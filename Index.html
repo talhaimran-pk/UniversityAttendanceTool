@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Attendance Utility</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Custom styles for mobile simulation and font */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #f7f9fb;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      min-height: 100vh;
+    }
+
+    /* Mobile device frame simulation */
+    #app-container {
+      width: 100%;
+      max-width: 420px;
+      /* Standard smartphone width limit */
+      height: 100vh;
+      background-color: white;
+      box-shadow: 0 0 30px rgba(0, 0, 0, 0.1);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Touch target size focus */
+    .list-item-tap {
+      min-height: 64px;
+      /* Large touch target */
+    }
+
+    .attendance-button {
+      height: 60px;
+      /* Extra large button for thumb-taps */
+      width: 48%;
+      /* Ensures two fit well with spacing */
+      font-weight: 700;
+      transition: background-color 0.15s, transform 0.1s;
+    }
+
+    .attendance-button:active {
+      transform: scale(0.98);
+    }
+
+    /* Utility classes for visual feedback */
+    /* Tailwind colors updated for the button logic */
+    .status-P-active {
+      background-color: #10B981 !important;
+      /* Tailwind Green 500 */
+      color: white !important;
+    }
+
+    .status-A-active {
+      background-color: #EF4444 !important;
+      /* Tailwind Red 500 */
+      color: white !important;
+    }
+
+    .progress-complete {
+      color: #10B981 !important;
+    }
+  </style>
+</head>
+
+<body class="antialiased">
+
+  <div id="app-container">
+    <div id="view-container" class="flex-1 overflow-y-auto">
+    </div>
+  </div>
+
+  <script>
+    // Add this function within the main <script> block in Index.html
+window.filterSheets = (searchTerm) => {
+    const term = searchTerm.toLowerCase();
+    const filtered = currentState.sheetsList.filter(sheet => 
+        sheet.name.toLowerCase().includes(term)
+    );
+    // Use a dedicated, simplified function to render the currently filtered list
+    renderFilteredSheetList(filtered);
+};
+
+// New function to handle rendering based on a filtered list
+function renderFilteredSheetList(sheetsToRender) {
+    const $list = document.getElementById('sheetList');
+    $list.innerHTML = sheetsToRender.map(sheet => `
+        <div onclick="selectSheet('${sheet.id}', '${sheet.name}')"
+             class="list-item-tap bg-white p-4 rounded-xl shadow-md border-l-4 border-indigo-500 active:bg-indigo-50 transition duration-100 ease-in-out cursor-pointer flex items-center justify-between">
+            <div>
+                <p class="font-semibold text-gray-800 text-lg">${sheet.name}</p>
+                <p class="text-xs text-gray-500 mt-1">Tap to configure & load roster</p>
+            </div>
+            <svg class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" /></svg>
+        </div>
+    `).join('');
+    
+    // Show a message if no results are found
+    if (sheetsToRender.length === 0) {
+        $list.innerHTML = `<p class="text-center text-gray-500 p-8">No sheets match "${searchTerm}".</p>`;
+    }
+}
+
+// UPDATE displaySheets to call the new function and store the full list
+function displaySheets(sheets) {
+    currentState.sheetsList = sheets; 
+    renderFilteredSheetList(sheets); // Render the full list initially
+}
+
+    // --- STATE MANAGEMENT ---
+    let currentState = {
+        view: 'sheetSelect', // 'sheetSelect', 'config', 'marking'
+        sheetsList: [], // Will hold the real sheets list
+        selectedSheet: null,
+        roster: [], // Will hold the real roster data
+        attendanceDate: null, 
+        // --- REAL-TIME BACKEND VARS ---
+        attendanceColIndex: null, // Critical: 1-based index from ServerLogic
+        currentSheetTab: "Sheet1", // Default to Sheet1
+    };
+
+    const $viewContainer = document.getElementById('view-container');
+
+    // --- UTILITIES ---
+    const todayDateInput = new Date().toISOString().split('T')[0]; // YYYY-MM-DD for input
+    
+    function formatDateForDisplay(dateString) {
+        // Formats YYYY-MM-DD string into a readable format (e.g., Tue, Nov 11)
+        if (!dateString) return 'Date Not Set';
+        return new Date(dateString).toLocaleDateString('en-US', {
+            weekday: 'short',
+            month: 'short',
+            day: 'numeric'
+        });
+    }
+    
+    function columnLetterToNumber(letter) {
+        let column = 0;
+        const len = letter.length;
+        for (let i = 0; i < len; i++) {
+            column += (letter.charCodeAt(i) - 64) * Math.pow(26, len - i - 1);
+        }
+        return column > 0 ? column : -1;
+    }
+
+    // --- ERROR & LOADING HANDLERS ---
+    function showError(error) {
+        const message = error.message || error;
+        alert(`APP ERROR: ${message}`);
+        console.error("Apps Script Error:", error);
+        // Fallback to Sheet Select on critical error
+        changeView('sheetSelect');
+    }
+
+    function setAppLoading(isLoading) {
+        const btn = document.getElementById('load-roster-btn');
+        if (btn) {
+             btn.disabled = isLoading;
+             btn.textContent = isLoading ? 'Processing...' : 'Load Roster & Start Marking';
+        }
+    }
+
+
+    // --- SCREEN RENDERING FUNCTIONS ---
+
+    // 1. Screen 1: Sheet Selection (Home Screen)
+    function renderSheetSelect() {
+        $viewContainer.innerHTML = `
+            <header class="bg-indigo-600 text-white p-4 sticky top-0 shadow-lg z-10">
+                <h1 class="text-xl font-bold">BIIT Attendance Tool</h1>
+                <p class="text-sm opacity-90">Select a Class Sheet</p>
+            </header>
+            <div class="p-4 space-y-4">
+    <div class="relative">
+        <input type="text" id="sheetSearch" placeholder="Search sheets by name..." 
+               class="w-full p-3 pl-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 shadow-sm"
+               oninput="filterSheets(this.value)"> 
+        </div>
+    <div id="sheetList" class="space-y-2">
+                    <p class="text-center text-gray-500 p-8">Loading your Google Sheets...</p>
+                </div>
+            </div>
+        `;
+        // START: Call the real backend function
+        google.script.run
+            .withSuccessHandler(displaySheets)
+            .withFailureHandler(showError)
+            .getSpreadsheets();
+    }
+
+    function displaySheets(sheets) {
+        currentState.sheetsList = sheets; // Store real sheet data
+        const $list = document.getElementById('sheetList');
+        $list.innerHTML = ''; 
+
+        if (sheets.length === 0) {
+            $list.innerHTML = '<p class="text-center text-red-500 p-8">No Google Sheets found or you may not own any in your drive.</p>';
+            return;
+        }
+
+        sheets.forEach(sheet => {
+            $list.innerHTML += `
+                <div onclick="selectSheet('${sheet.id}', '${sheet.name}')"
+                     class="list-item-tap bg-white p-4 rounded-xl shadow-md border-l-4 border-indigo-500 active:bg-indigo-50 transition duration-100 ease-in-out cursor-pointer flex items-center justify-between">
+                    <div>
+                        <p class="font-semibold text-gray-800 text-lg">${sheet.name}</p>
+                        <p class="text-xs text-gray-500 mt-1">Tap to configure & load roster</p>
+                    </div>
+                    <svg class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" /></svg>
+                </div>
+            `;
+        });
+    }
+
+    window.selectSheet = (id, name) => {
+        currentState.selectedSheet = { id, name };
+        currentState.view = 'config';
+        renderView();
+    };
+
+    // 2. Screen 2: Sheet Configuration (Setup)
+    function renderConfigScreen() {
+        // Mock default config for first-time use
+        const defaultNameColumn = 'C';
+        const defaultStartRow = 2;
+
+        $viewContainer.innerHTML = `
+            <header class="bg-indigo-600 text-white p-4 sticky top-0 shadow-lg z-10 flex items-center justify-between">
+                <button onclick="changeView('sheetSelect')" class="text-white hover:text-indigo-200 p-2 -ml-2 rounded-full active:bg-indigo-700 transition">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                </button>
+                <h1 class="text-lg font-bold truncate flex-1 ml-4">Configuring: ${currentState.selectedSheet.name}</h1>
+            </header>
+            
+            <div class="p-6 space-y-6 flex flex-col flex-1">
+                <p class="text-gray-600 text-center font-medium">Define your roster structure and select the date for marking.</p>
+
+                <div class="space-y-4" id="config-form">
+                    ${renderInputField("nameColumn", "Student Names Column (e.g., C)", defaultNameColumn)}
+                    ${renderInputField("startRow", "First Student Row Number (e.g., 2)", defaultStartRow, "number")}
+                    
+                    <div>
+                        <label for="attendanceDate" class="block text-sm font-medium text-gray-700 mb-2">Attendance Date</label>
+                        <input type="date" id="attendanceDate" value="${todayDateInput}" 
+                            class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-lg shadow-sm list-item-tap">
+                    </div>
+                </div>
+
+                <div class="space-y-3 mt-auto pt-4">
+                    <button id="load-roster-btn" onclick="loadRoster()"
+                            class="w-full p-4 bg-indigo-600 text-white font-bold text-lg rounded-xl shadow-lg hover:bg-indigo-700 transition duration-150 list-item-tap">
+                        Load Roster & Start Marking
+                    </button>
+                    // <button class="w-full p-3 text-sm text-indigo-500 bg-indigo-50 rounded-xl hover:bg-indigo-100 transition duration-150">
+                    //     Use Previous Structure (B, Row 2) - *Feature TBD*
+                    // </button>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderInputField(id, label, value, type = "text") {
+        const isColumn = type === "text";
+        return `
+            <div>
+                <label for="${id}" class="block text-sm font-medium text-gray-700 mb-2">${label}</label>
+                <input type="${type}" id="${id}" value="${value}" 
+                        class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-lg ${isColumn ? 'font-mono uppercase' : ''} shadow-sm list-item-tap" 
+                        ${isColumn ? 'oninput="this.value = this.value.toUpperCase()"' : ''}>
+            </div>
+        `;
+    }
+
+    window.loadRoster = () => {
+        const date = document.getElementById('attendanceDate').value; // YYYY-MM-DD string
+        const nameCol = document.getElementById('nameColumn').value.toUpperCase();
+        const startRow = parseInt(document.getElementById('startRow').value);
+        
+        if (!date || !nameCol || isNaN(startRow) || startRow < 1) {
+            alert("Please ensure all configuration fields are valid.");
+            return;
+        }
+
+        const nameColIndex = columnLetterToNumber(nameCol); 
+        if (nameColIndex === -1) {
+            showError({ message: "Invalid column letter provided for student names." });
+            return;
+        }
+
+        setAppLoading(true);
+
+        // 1. Find or Create the column for the attendance date
+        google.script.run
+            .withSuccessHandler(attendanceColIndex => {
+                // Store the dynamically found/created column index on the state
+                currentState.attendanceColIndex = attendanceColIndex; 
+                currentState.attendanceDate = date; // Store the date string
+                
+                // 2. Load the roster data using the determined column index
+                google.script.run
+                    .withSuccessHandler(displayRoster)
+                    .withFailureHandler(showError)
+                    .getRosterData(
+                        currentState.selectedSheet.id, 
+                        currentState.currentSheetTab, 
+                        nameColIndex, 
+                        startRow, 
+                        attendanceColIndex
+                    );
+            })
+            .withFailureHandler(showError)
+            .findOrCreateAttendanceColumn(
+                currentState.selectedSheet.id, 
+                currentState.currentSheetTab, 
+                date
+            );
+    };
+
+    // 3. Screen 3: Attendance Marking (The Core Utility)
+    function renderMarkingScreen() {
+        const displayDate = formatDateForDisplay(currentState.attendanceDate);
+        
+        $viewContainer.innerHTML = `
+            <header class="bg-white p-4 shadow-md sticky top-0 z-10">
+                <div class="flex items-center justify-between">
+                    <button onclick="changeView('config')" class="text-gray-500 hover:text-indigo-600 p-2 -ml-2 rounded-full active:bg-gray-100 transition" title="Change Configuration">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                    </button>
+                    <h1 class="text-lg font-bold text-gray-900 truncate flex-1 text-center">${currentState.selectedSheet.name}</h1>
+                    <span class="text-sm font-semibold text-gray-600">${displayDate}</span>
+                </div>
+            </header>
+            
+            <div id="rosterList" class="flex-1 overflow-y-auto divide-y divide-gray-100 p-2">
+                </div>
+            
+            <footer class="bg-gray-50 p-4 border-t sticky bottom-0 text-center">
+              <p class="text-sm text-gray-500" id="progressText">0 / 0 Marked</p>
+    
+                <button id="finish-cta" onclick="changeView('sheetSelect')" 
+                    class="w-full p-3 mt-3 bg-green-500 text-white font-bold rounded-xl shadow-md transition duration-150 hidden">
+                    Marking Complete! Return to Home
+                </button>
+              </footer>
+        `;
+        renderRosterList();
+    }
+    
+    function displayRoster(roster) {
+        setAppLoading(false);
+        currentState.roster = roster.map(student => ({
+            ...student,
+            // Add a client-side ID for easy DOM manipulation (used for scrolling/targeting)
+            clientRowId: `student-${student.rowIndex}` 
+        }));
+        
+        currentState.view = 'marking';
+        renderView();
+    }
+
+    function renderRosterList() {
+        const $list = document.getElementById('rosterList');
+        $list.innerHTML = currentState.roster.map(student => {
+            const isPresent = student.status === 'P';
+            const isAbsent = student.status === 'A';
+            
+            return `
+                <div id="${student.clientRowId}" data-row-index="${student.rowIndex}" class="flex items-center justify-between p-3 bg-white transition duration-100">
+                    <p class="text-lg font-medium text-gray-800 flex-1 min-w-0 mr-4">${student.name}</p>
+                    <div class="flex space-x-2 w-1/2">
+                        <button onclick="markAttendance('${student.clientRowId}', 'P')"
+                                class="attendance-button rounded-xl ${isPresent ? 'status-P-active shadow-lg' : 'bg-gray-200 text-gray-500 hover:bg-green-100 hover:text-green-800'} transition"
+                                title="Mark Present">P</button>
+                        <button onclick="markAttendance('${student.clientRowId}', 'A')"
+                                class="attendance-button rounded-xl ${isAbsent ? 'status-A-active shadow-lg' : 'bg-gray-200 text-gray-500 hover:bg-red-100 hover:text-red-800'} transition"
+                                title="Mark Absent">A</button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+        updateProgress();
+    }
+
+    window.markAttendance = (clientRowId, status) => {
+        const studentIndex = currentState.roster.findIndex(s => s.clientRowId === clientRowId);
+        const student = currentState.roster[studentIndex];
+        const newStatus = (student.status === status) ? '' : status; // Tap to unmark logic
+        const rowIndex = student.rowIndex; // Get the actual spreadsheet row index
+
+        // 1. Provide INSTANT VISUAL FEEDBACK (DOM manipulation)
+        const $row = document.getElementById(clientRowId);
+        const $pButton = $row.querySelector('button[title="Mark Present"]');
+        const $aButton = $row.querySelector('button[title="Mark Absent"]');
+        
+        // Temporarily disable buttons to prevent rapid-fire errors
+        $pButton.disabled = $aButton.disabled = true;
+
+        // Reset and Apply new status visually
+        $pButton.classList.remove('status-P-active', 'shadow-lg');
+        $aButton.classList.remove('status-A-active', 'shadow-lg');
+        
+        if (newStatus === 'P') { $pButton.classList.add('status-P-active', 'shadow-lg'); } 
+        if (newStatus === 'A') { $aButton.classList.add('status-A-active', 'shadow-lg'); }
+        
+        // 2. Call the server function to write the data
+        google.script.run
+            .withSuccessHandler(response => {
+                // Re-enable buttons
+                $pButton.disabled = $aButton.disabled = false;
+                
+                if (response.success) {
+                    // Update client state after successful write
+                    currentState.roster[studentIndex].status = newStatus; 
+                    updateProgress();
+                    // Scroll to next unmarked student for speed
+                    scrollToNextUnmarked(studentIndex);
+                } else {
+                    // Revert visual state on failure
+                    renderRosterList(); 
+                    showError({ message: `Write Failed for ${student.name}: ${response.message}` });
+                }
+            })
+            .withFailureHandler(error => {
+                $pButton.disabled = $aButton.disabled = false;
+                showError(error);
+            })
+            .markAttendance(
+                currentState.selectedSheet.id, 
+                currentState.currentSheetTab, 
+                rowIndex, 
+                currentState.attendanceColIndex, 
+                newStatus
+            );
+    };
+
+    function scrollToNextUnmarked(lastMarkedIndex) {
+        // Start search from the student *after* the one just marked
+        const nextIndex = currentState.roster.findIndex((s, i) => i > lastMarkedIndex && s.status === ''); 
+        
+        if (nextIndex !== -1) {
+            const nextStudentId = currentState.roster[nextIndex].clientRowId;
+            const $nextRow = document.getElementById(nextStudentId);
+            if ($nextRow) {
+                // Scroll the next student into the middle of the view
+                $nextRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        }
+    }
+
+
+    function updateProgress() {
+    const markedCount = currentState.roster.filter(s => s.status !== '').length;
+    const total = currentState.roster.length;
+    const $progressText = document.getElementById('progressText');
+    const $finishCta = document.getElementById('finish-cta'); // Get the new button
+
+    if ($progressText) {
+        $progressText.textContent = `${markedCount} / ${total} Marked`;
+        $progressText.classList.remove('progress-complete', 'font-bold');
+        
+        if ($finishCta) {
+            $finishCta.classList.add('hidden'); // Default to hidden
+        }
+
+        if (markedCount === total && total > 0) {
+            $progressText.classList.add('progress-complete', 'font-bold');
+            if ($finishCta) {
+                // Show the CTA button
+                $finishCta.classList.remove('hidden'); 
+            }
+        }
+    }
+}
+
+    // --- VIEW CONTROLLER ---
+    window.changeView = (newView) => {
+        currentState.view = newView;
+        renderView();
+    }
+
+    function renderView() {
+        document.getElementById('view-container').scrollTop = 0; 
+        switch (currentState.view) {
+            case 'sheetSelect':
+                renderSheetSelect();
+                break;
+            case 'config':
+                renderConfigScreen();
+                break;
+            case 'marking':
+                if (currentState.selectedSheet) {
+                    renderMarkingScreen();
+                } else {
+                    renderSheetSelect(); 
+                }
+                break;
+            default:
+                renderSheetSelect();
+        }
+    }
+
+    // Initial load
+    window.onload = renderView;
+  </script>
+</body>
+
+</html>
